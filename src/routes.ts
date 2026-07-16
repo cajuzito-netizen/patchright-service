@@ -17,12 +17,11 @@ import {
   EvalRequest,
 } from './types.js';
 
-const router = Router();
+const router: ReturnType<typeof Router> = Router();
 
 // ==================== Profiles ====================
 
-router.post('/profiles', (req: Request, res: Response) => {
-  // Profiles are just directories - created automatically when browser starts
+router.post('/profiles', (_req: Request, res: Response<ApiResponse>) => {
   res.json({ success: true, message: 'Profile will be created when browser starts' });
 });
 
@@ -53,9 +52,9 @@ router.post('/browsers', async (req: Request, res: Response<ApiResponse>) => {
 });
 
 /** GET /browsers - List all browsers */
-router.get('/browsers', (req: Request, res: Response<ApiResponse>) => {
+router.get('/browsers', (_req: Request, res: Response<ApiResponse>) => {
   const browsers = browserManager.list();
-  res.json({ success: true, data: browsers });
+  res.json({ success: true, message: 'Browsers listed', data: browsers });
 });
 
 /** DELETE /browsers/:id - Close a browser */
@@ -76,7 +75,7 @@ router.post('/browsers/:browserId/pages', async (req: Request, res: Response<Api
     if (!page) {
       return res.status(404).json({ success: false, message: 'Browser not found' });
     }
-    res.json({ success: true, data: page });
+    res.json({ success: true, message: 'Page created', data: page });
   } catch (error) {
     res.status(500).json({ success: false, message: (error as Error).message });
   }
@@ -99,7 +98,7 @@ router.post('/browsers/:browserId/pages/:pageId/goto', async (req: Request, res:
         return { url: page.url(), title: await page.title() };
       }
     );
-    res.json({ success: true, data: result });
+    res.json({ success: true, message: 'Navigated', data: result });
   } catch (error) {
     res.status(400).json({ success: false, message: (error as Error).message });
   }
@@ -159,7 +158,7 @@ router.post('/browsers/:browserId/pages/:pageId/eval', async (req: Request, res:
       req.params.pageId,
       page => page.evaluate(script)
     );
-    res.json({ success: true, data: { result } });
+    res.json({ success: true, message: 'Evaluated', data: { result } });
   } catch (error) {
     res.status(400).json({ success: false, message: (error as Error).message });
   }
@@ -178,7 +177,7 @@ router.post('/browsers/:browserId/pages/:pageId/screenshot', async (req: Request
         return buf.toString('base64');
       }
     );
-    res.json({ success: true, data: { screenshot: buffer } });
+    res.json({ success: true, message: 'Screenshot taken', data: { screenshot: buffer } });
   } catch (error) {
     res.status(400).json({ success: false, message: (error as Error).message });
   }
@@ -195,7 +194,7 @@ router.get('/browsers/:browserId/pages/:pageId/content', async (req: Request, re
       req.params.pageId,
       page => page.content()
     );
-    res.json({ success: true, data: { html } });
+    res.json({ success: true, message: 'Content retrieved', data: { html } });
   } catch (error) {
     res.status(400).json({ success: false, message: (error as Error).message });
   }
@@ -207,13 +206,14 @@ router.get('/browsers/:browserId/pages/:pageId/content', async (req: Request, re
  */
 router.get('/browsers/:browserId/cookies', async (req: Request, res: Response<ApiResponse>) => {
   try {
-    // Get cookies from first page's context
-    const state = (browserManager as any).browsers.get(req.params.browserId);
-    if (!state) {
+    const browser = browserManager.get(req.params.browserId);
+    if (!browser) {
       return res.status(404).json({ success: false, message: 'Browser not found' });
     }
+
+    const state = (browserManager as any).browsers.get(req.params.browserId);
     const cookies = await state.context.cookies();
-    res.json({ success: true, data: { cookies } });
+    res.json({ success: true, message: 'Cookies retrieved', data: { cookies } });
   } catch (error) {
     res.status(400).json({ success: false, message: (error as Error).message });
   }

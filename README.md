@@ -2,89 +2,77 @@
 
 Remote browser automation with stealth. Chrome runs on server, you control it from your machine.
 
-## Architecture
-
-```
-Your Machine                           Server
-┌─────────────────┐                   ┌─────────────────┐
-│  Your Code      │                   │  Patchright      │
-│                 │    HTTP           │  ┌─────────────┐ │
-│  client.newBrowser()  ────────────► │  │ Chrome 1    │ │
-│  page.goto(url)│                   │  │ (profile A) │ │
-│  page.click()  │ ◄──────────── │  └─────────────┘ │
-│                 │                   │  ┌─────────────┐ │
-└─────────────────┘                   │  │ Chrome 2    │ │
-                                      │  │ (profile B) │ │
-                                      │  └─────────────┘ │
-                                      │                   │
-                                      │  profiles/        │
-                                      │  ├── A/ (cookies) │
-                                      │  └── B/ (cookies) │
-                                      └─────────────────┘
-```
-
 ## Setup
 
-### Server (where Chrome runs)
+### Option 1: Direct Installation (no Docker)
 
 ```bash
-# Install
-npm install
-npx patchright install chrome
-npm run build
+# Clone
+git clone https://github.com/cajuzito-netizen/patchright-service.git
+cd patchright-service
 
-# Run
-npm start
+# Install dependencies
+pnpm install
 
-# Or Docker
+# Install Chrome browser
+pnpm run install-browsers
+
+# Build TypeScript
+pnpm run build
+
+# Start server
+pnpm start
+```
+
+### Option 2: Docker
+
+```bash
 docker-compose up -d
 ```
 
-### Client (your machine)
+## System Requirements (for direct installation)
 
+### Ubuntu/Debian
 ```bash
-npm install patchright-service  # or copy src/client.ts
+sudo apt-get update && sudo apt-get install -y \
+    xvfb x11-utils libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+    libcups2 libdrm2 libdbus-1-3 libxkbcommon0 libatspi2.0-0 \
+    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+    libpango-1.0-0 libcairo2 libasound2 libwayland-client0
+```
+
+### CentOS/RHEL
+```bash
+sudo yum install -y \
+    xorg-x11-server-Xvfb libnss3 libatk-bridge2.0-0 \
+    cups-libs libdrm libdbus-glib libXcomposite libXdamage \
+    libXrandr mesa-libgbm pango cairo alsa-lib
+```
+
+### macOS
+```bash
+brew install xquartz
 ```
 
 ## Usage
 
 ```typescript
-import { PatchrightClient } from './src/client.js';
+import { PatchrightClient } from 'patchright-client';
 
-// Connect to your server
 const client = new PatchrightClient('http://your-server:8000');
 
-// Create a browser (creates Chrome context on server)
 const browser = await client.newBrowser('my-account');
-
-// Create a page (creates tab on server)
 const page = await browser.newPage();
 
-// Use it like Playwright
 await page.goto('https://example.com');
-await page.click('#login');
-await page.fill('#user', 'admin');
-await page.fill('#pass', '1234');
+await page.click('#button');
+await page.fill('#input', 'hello');
 
-// Get data
 const html = await page.content();
 const screenshot = await page.screenshot();
-const cookies = await browser.cookies();
 
-// Cleanup
 await browser.close();
 ```
-
-## How It Works
-
-1. **You call** `client.newBrowser('my-account')`
-2. **Server creates** a Chrome context with:
-   - Persistent storage in `profiles/my-account/`
-   - Stealth patches (Patchright)
-   - Xvfb virtual display
-3. **Server returns** a browser ID
-4. **You use** the browser ID to create pages and interact
-5. **Cookies persist** on server in `profiles/my-account/`
 
 ## API
 
@@ -95,43 +83,9 @@ await browser.close();
 | DELETE | `/browsers/:id` | Close browser |
 | POST | `/browsers/:id/pages` | Create page |
 | POST | `/browsers/:id/pages/:pageId/goto` | Navigate |
-| POST | `/browsers/:id/pages/:pageId/click` | Click element |
+| POST | `/browsers/:id/pages/:pageId/click` | Click |
 | POST | `/browsers/:id/pages/:pageId/fill` | Fill input |
 | POST | `/browsers/:id/pages/:pageId/eval` | Run JS |
 | POST | `/browsers/:id/pages/:pageId/screenshot` | Screenshot |
 | GET | `/browsers/:id/pages/:pageId/content` | Get HTML |
 | GET | `/browsers/:id/cookies` | Get cookies |
-
-## Concurrency
-
-Multiple browsers run in parallel on the server:
-
-```typescript
-// These all run concurrently
-const [b1, b2, b3] = await Promise.all([
-  client.newBrowser('user1'),
-  client.newBrowser('user2'),
-  client.newBrowser('user3'),
-]);
-
-// Each browser is isolated
-await Promise.all([
-  b1.newPage().then(p => p.goto('https://a.com')),
-  b2.newPage().then(p => p.goto('https://b.com')),
-  b3.newPage().then(p => p.goto('https://c.com')),
-]);
-```
-
-## Data Storage
-
-```
-profiles/
-├── my-account/
-│   └── Default/           ← Chrome user data
-│       ├── Cookies        ← Saved cookies
-│       ├── Local Storage/ ← localStorage
-│       ├── IndexedDB/     ← IndexedDB
-│       └── Cache/         ← HTTP cache
-```
-
-Cookies and storage **persist on server**. Next time you create a browser with the same profile name, you'll have the same session.

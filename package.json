@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "install-browsers": "patchright install chrome"
   },
   "dependencies": {
     "patchright": "^1.59.0",

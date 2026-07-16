@@ -55,13 +55,15 @@ class BrowserManager {
     const profilesDir = config.profilesDir;
 
     // Create context with user_data_dir for persistence
-    const context = await chromium.launchPersistentContext({
-      userDataDir: `${profilesDir}/${profileName}`,
-      channel: 'chrome',
-      headless: false,
-      noViewport: true,
-      args: ['--disable-blink-features=AutomationControlled'],
-    });
+    const context = await chromium.launchPersistentContext(
+      `${profilesDir}/${profileName}`,
+      {
+        channel: 'chrome',
+        headless: false,
+        viewport: null,
+        args: ['--disable-blink-features=AutomationControlled'],
+      }
+    );
 
     // Create initial page
     const page = await context.newPage();
