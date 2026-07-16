@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  patchright:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./profiles:/app/profiles
+    restart: unless-stopped
