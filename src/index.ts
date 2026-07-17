@@ -41,11 +41,24 @@ let xvfb: ChildProcess | null = null;
 function startXvfb() {
   try { execSync(`pkill -f "Xvfb ${config.displayNum}"`, { stdio: 'ignore' }); } catch {}
   
-  xvfb = spawn('/usr/bin/Xvfb', [
+  // Find Xvfb binary
+  let xvfbPath = '/usr/bin/Xvfb';
+  try {
+    xvfbPath = execSync('which Xvfb 2>/dev/null || echo /usr/bin/Xvfb').toString().trim();
+  } catch {}
+  
+  console.log(`Starting Xvfb from: ${xvfbPath}`);
+  
+  xvfb = spawn(xvfbPath, [
     config.displayNum,
     '-screen', '0', config.screenSize,
     '+extension', 'GLX',
   ], { stdio: 'ignore', detached: true });
+  
+  xvfb.on('error', (err) => {
+    console.error('Xvfb error:', err.message);
+    console.error('Make sure Xvfb is installed: sudo apt-get install xvfb');
+  });
   
   xvfb.unref();
   process.env.DISPLAY = config.displayNum;
