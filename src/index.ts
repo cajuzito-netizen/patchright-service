@@ -41,7 +41,7 @@ let xvfb: ChildProcess | null = null;
 function startXvfb() {
   try { execSync(`pkill -f "Xvfb ${config.displayNum}"`, { stdio: 'ignore' }); } catch {}
   
-  xvfb = spawn('Xvfb', [
+  xvfb = spawn('/usr/bin/Xvfb', [
     config.displayNum,
     '-screen', '0', config.screenSize,
     '+extension', 'GLX',
