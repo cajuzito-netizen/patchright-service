@@ -236,13 +236,13 @@ router.get('/browsers/:browserId/pages/:pageId/content', async (req: Request, re
  */
 router.get('/browsers/:browserId/cookies', async (req: Request, res: Response<ApiResponse>) => {
   try {
-    const browser = browserManager.get(req.params.browserId);
-    if (!browser) {
+    // Find the context for this browser
+    const context = (browserManager as any).findContext?.(req.params.browserId);
+    if (!context) {
       return res.status(404).json({ success: false, message: 'Browser not found' });
     }
 
-    const state = (browserManager as any).browsers.get(req.params.browserId);
-    const cookies = await state.context.cookies();
+    const cookies = await context.cookies();
     res.json({ success: true, message: 'Cookies retrieved', data: { cookies } });
   } catch (error) {
     res.status(400).json({ success: false, message: (error as Error).message });

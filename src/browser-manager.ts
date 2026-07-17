@@ -213,6 +213,15 @@ class BrowserManager {
     throw new Error(`Browser ${browserId} not found`);
   }
 
+  findContext(browserId: string): BrowserContext | null {
+    for (const managed of this.sessions.values()) {
+      if (managed.info.id === browserId) {
+        return managed.context;
+      }
+    }
+    return null;
+  }
+
   getStats() {
     return {
       activeSessions: this.sessions.size,
