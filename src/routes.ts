@@ -19,6 +19,13 @@ import {
 
 const router: ReturnType<typeof Router> = Router();
 
+// ==================== Stats ====================
+
+router.get('/stats', (_req: Request, res: Response<ApiResponse>) => {
+  const stats = browserManager.getStats();
+  res.json({ success: true, message: 'Stats', data: stats });
+});
+
 // ==================== Profiles ====================
 
 router.post('/profiles', (_req: Request, res: Response<ApiResponse>) => {

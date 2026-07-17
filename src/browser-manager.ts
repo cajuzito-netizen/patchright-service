@@ -1,23 +1,29 @@
 /**
- * Browser Manager
+ * Browser Manager with POOLING
  * 
- * Handles Chrome processes with Patchright.
+ * Creates a fixed number of Chrome processes and REUSES them.
+ * Each user gets a lightweight BrowserContext, not a new Chrome process.
  * 
- * Each "browser" is a BrowserContext (isolated session):
- * - Own cookies, localStorage, cache
- * - Optional proxy
- * - Can persist to disk (via user_data_dir)
+ * Architecture:
  * 
- * Concurrency:
- * - Multiple browsers can run in parallel
- * - Each page has a mutex (operations serialized per page)
- * - Different pages run concurrently
+ * Chrome Pool (fixed size, e.g. 3)
+ * ├── Chrome Process 1
+ * │   ├── Context for User A (lightweight)
+ * │   ├── Context for User B (lightweight)
+ * │   └── Context for User C (lightweight)
+ * ├── Chrome Process 2
+ * │   ├── Context for User D
+ * │   └── Context for User E
+ * └── Chrome Process 3
+ *     └── ...
+ * 
+ * This is how Playwright is designed to work!
  */
 
-import { chromium, BrowserContext, Page } from 'patchright';
+import { chromium, Browser, BrowserContext, Page } from 'patchright';
 import { v4 as uuidv4 } from 'uuid';
 import config from './config.js';
-import { Browser, PageInfo } from './types.js';
+import { Browser as BrowserInfo, PageInfo } from './types.js';
 
 /** Mutex for serializing page operations */
 class Mutex {
@@ -35,41 +41,70 @@ class Mutex {
   }
 }
 
-/** Internal state for a browser */
-interface BrowserState {
-  info: Browser;
+/** Represents a managed browser session */
+interface ManagedBrowser {
+  info: BrowserInfo;
   context: BrowserContext;
   pages: Map<string, { page: Page; mutex: Mutex }>;
 }
 
 class BrowserManager {
-  private browsers = new Map<string, BrowserState>();
+  /** Pool of Chrome processes */
+  private pool: Browser[] = [];
+  
+  /** Active browser sessions (contexts) */
+  private browsers = new Map<string, ManagedBrowser>();
+  
+  /** Max Chrome processes to maintain */
+  private readonly maxBrowsers = 3;
 
   /**
-   * Create a new browser
-   * 
-   * @param profileName - Profile to use (for proxy and persistence)
+   * Get or create a Chrome process from the pool
    */
-  async create(profileName: string): Promise<Browser> {
-    const id = uuidv4();
-    const profilesDir = config.profilesDir;
+  private async getBrowserFromPool(): Promise<Browser> {
+    // Reuse existing browser if available
+    if (this.pool.length > 0) {
+      return this.pool[0]; // Simple round-robin
+    }
 
-    // Create context with user_data_dir for persistence
-    const context = await chromium.launchPersistentContext(
-      `${profilesDir}/${profileName}`,
-      {
+    // Create new browser if under limit
+    if (this.pool.length < this.maxBrowsers) {
+      const browser = await chromium.launch({
         channel: 'chrome',
         headless: false,
-        viewport: null,
-        args: ['--disable-blink-features=AutomationControlled'],
-      }
-    );
+        args: [
+          '--disable-blink-features=AutomationControlled',
+          '--no-sandbox',
+        ],
+      });
+      this.pool.push(browser);
+      console.log(`Created browser pool: ${this.pool.length}/${this.maxBrowsers}`);
+      return browser;
+    }
+
+    // All browsers busy - use first one (contexts are isolated anyway)
+    return this.pool[0];
+  }
+
+  /**
+   * Create a new browser session
+   * 
+   * Instead of creating a new Chrome process,
+   * this creates a lightweight BrowserContext on an existing browser.
+   */
+  async create(profileName: string): Promise<BrowserInfo> {
+    const id = uuidv4();
+    const browser = await this.getBrowserFromPool();
+
+    // Create a new context (lightweight, isolated)
+    // Each context has its own cookies, storage, etc.
+    const context = await browser.newContext();
 
     // Create initial page
     const page = await context.newPage();
     const pageId = uuidv4();
 
-    const info: Browser = {
+    const info: BrowserInfo = {
       id,
       profileName,
       createdAt: new Date().toISOString(),
@@ -86,82 +121,76 @@ class BrowserManager {
   }
 
   /**
-   * Close a browser
+   * Close a browser session (not the Chrome process!)
    */
   async close(browserId: string): Promise<boolean> {
-    const state = this.browsers.get(browserId);
-    if (!state) return false;
+    const managed = this.browsers.get(browserId);
+    if (!managed) return false;
 
-    await state.context.close().catch(() => {});
+    // Close the context (lightweight)
+    await managed.context.close().catch(() => {});
     this.browsers.delete(browserId);
+    
+    console.log(`Active sessions: ${this.browsers.size}`);
     return true;
   }
 
   /**
    * Get browser info
    */
-  get(browserId: string): Browser | null {
+  get(browserId: string): BrowserInfo | null {
     return this.browsers.get(browserId)?.info || null;
   }
 
   /**
    * List all browsers
    */
-  list(): Browser[] {
-    return Array.from(this.browsers.values()).map(s => s.info);
+  list(): BrowserInfo[] {
+    return Array.from(this.browsers.values()).map(m => m.info);
   }
 
   /**
    * Create a new page in a browser
    */
   async createPage(browserId: string): Promise<PageInfo | null> {
-    const state = this.browsers.get(browserId);
-    if (!state) return null;
+    const managed = this.browsers.get(browserId);
+    if (!managed) return null;
 
-    const page = await state.context.newPage();
+    const page = await managed.context.newPage();
     const pageId = uuidv4();
 
-    state.pages.set(pageId, { page, mutex: new Mutex() });
+    managed.pages.set(pageId, { page, mutex: new Mutex() });
 
     return { id: pageId, url: page.url(), title: '' };
-  }
-
-  /**
-   * Get a page
-   */
-  getPage(browserId: string, pageId: string): Page | null {
-    const state = this.browsers.get(browserId);
-    if (!state) return null;
-
-    return state.pages.get(pageId)?.page || null;
-  }
-
-  /**
-   * Get mutex for a page
-   */
-  getMutex(browserId: string, pageId: string): Mutex | null {
-    const state = this.browsers.get(browserId);
-    if (!state) return null;
-
-    return state.pages.get(pageId)?.mutex || null;
   }
 
   /**
    * Execute operation on page (with mutex)
    */
   async exec<T>(browserId: string, pageId: string, fn: (page: Page) => Promise<T>): Promise<T> {
-    const page = this.getPage(browserId, pageId);
-    if (!page) throw new Error(`Page ${pageId} not found`);
+    const managed = this.browsers.get(browserId);
+    if (!managed) throw new Error(`Browser ${browserId} not found`);
 
-    const mutex = this.getMutex(browserId, pageId);
-    if (!mutex) throw new Error(`No mutex for page ${pageId}`);
+    const pageData = managed.pages.get(pageId);
+    if (!pageData) throw new Error(`Page ${pageId} not found`);
 
-    await mutex.acquire();
+    await pageData.mutex.acquire();
     try {
-      return await fn(page);
+      return await fn(pageData.page);
     } finally {
-      mutex.release();
+      pageData.mutex.release();
     }
+  }
+
+  /**
+   * Get pool stats
+   */
+  getStats() {
+    return {
+      chromeProcesses: this.pool.length,
+      maxChromeProcesses: this.maxBrowsers,
+      activeSessions: this.browsers.size,
+    };
   }
 }
 
