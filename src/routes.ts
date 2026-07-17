@@ -78,6 +78,15 @@ router.get('/browsers', (_req: Request, res: Response<ApiResponse>) => {
   res.json({ success: true, message: 'Browsers listed', data: browsers });
 });
 
+/** GET /browsers/profile/:name - Get browser by profile name */
+router.get('/browsers/profile/:name', (req: Request, res: Response<ApiResponse>) => {
+  const browser = browserManager.getByProfile(req.params.name);
+  if (!browser) {
+    return res.status(404).json({ success: false, message: 'No session for this profile' });
+  }
+  res.json({ success: true, message: 'Browser found', data: browser });
+});
+
 /** DELETE /browsers/:id - Close a browser */
 router.delete('/browsers/:id', async (req: Request, res: Response<ApiResponse>) => {
   const closed = await browserManager.close(req.params.id);

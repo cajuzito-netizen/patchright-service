@@ -1,17 +1,23 @@
 /**
- * Browser Manager - Optimized Version
+ * Browser Manager with Persistent Sessions
  * 
- * Features:
- * - Chrome pooling (reuse processes)
- * - Context pooling (reuse contexts)  
- * - Request queuing (no busy waits)
- * - Idle cleanup (free unused resources)
- * - Context refresh (clean state on return)
+ * Each profile key maps to a persistent Chrome context.
+ * Cookies, localStorage, cache persist across:
+ * - Multiple requests with same key
+ * - Server restarts
+ * 
+ * Example:
+ *   POST /browsers { profileName: "account1" } → Creates context
+ *   POST /browsers { profileName: "account1" } → Returns SAME context
  */
 
 import { chromium, Browser, BrowserContext, Page } from 'patchright';
 import { v4 as uuidv4 } from 'uuid';
+import { resolve } from 'path';
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { Browser as BrowserInfo, PageInfo } from './types.js';
+
+const PROFILES_DIR = resolve(process.cwd(), 'profiles');
 
 class Mutex {
   private locked = false;
@@ -30,29 +36,29 @@ interface ManagedBrowser {
   info: BrowserInfo;
   context: BrowserContext;
   pages: Map<string, { page: Page; mutex: Mutex }>;
+  profileName: string;
+  lastActivity: number;
 }
 
 class BrowserManager {
-  private chromePool: Browser[] = [];
-  private contextPool: BrowserContext[] = [];
-  private browsers = new Map<string, ManagedBrowser>();
+  /** Active sessions by profile name */
+  private sessions = new Map<string, ManagedBrowser>();
   
-  // Queues for waiting requests
-  private contextQueue: Array<(ctx: BrowserContext) => void> = [];
+  /** Chrome processes (pooled) */
+  private chromePool: Browser[] = [];
   
   private readonly maxChrome = 3;
-  private readonly maxContexts = 10;
-  private readonly contextIdleMs = 60000; // 1 min idle cleanup
+  private readonly maxSessions = 50;
 
   constructor() {
+    mkdirSync(PROFILES_DIR, { recursive: true });
     this.initialize();
-    this.startIdleCleanup();
   }
 
   private async initialize() {
     console.log('Initializing browser pool...');
     
-    // Create Chrome processes in parallel
+    // Create Chrome processes
     const chromePromises = Array.from({ length: this.maxChrome }, () => 
       chromium.launch({
         channel: 'chrome',
@@ -62,74 +68,60 @@ class BrowserManager {
     );
     
     this.chromePool = await Promise.all(chromePromises);
-    console.log(`Chrome pool ready: ${this.chromePool.length}/${this.maxChrome}`);
-
-    // Pre-warm contexts
-    const warmupCount = Math.min(5, this.maxContexts);
-    const contextPromises = this.chromePool.map((chrome, i) => {
-      const count = i === 0 ? warmupCount : 0; // First chrome gets warmup
-      return Promise.all(Array.from({ length: count }, () => chrome.newContext()));
-    });
-    
-    const contexts = (await Promise.all(contextPromises)).flat();
-    this.contextPool.push(...contexts);
-    console.log(`Context pool warmed: ${this.contextPool.length} ready`);
+    console.log(`Chrome pool ready: ${this.chromePool.length}`);
   }
 
-  // ==================== Idle Cleanup ====================
+  // ==================== Profile Persistence ====================
 
-  private startIdleCleanup() {
-    setInterval(() => {
-      // Nothing to clean in current impl, but hook for future
-    }, this.contextIdleMs);
+  private getProfileDir(profileName: string): string {
+    return resolve(PROFILES_DIR, profileName);
   }
 
-  // ==================== Context Pool ====================
-
-  private async getContext(): Promise<BrowserContext> {
-    // Fast path: take from pool
-    if (this.contextPool.length > 0) {
-      return this.contextPool.pop()!;
-    }
-
-    // Slow path: create or wait
-    if (this.contextPool.length + this.browsers.size < this.maxContexts) {
-      // Can create new
-      const chrome = this.chromePool[this.browsers.size % this.chromePool.length];
-      return chrome.newContext();
-    }
-
-    // Must wait for one to be returned
-    return new Promise<BrowserContext>(resolve => {
-      this.contextQueue.push(resolve);
-    });
+  private getMetadataPath(profileName: string): string {
+    return resolve(this.getProfileDir(profileName), 'session.json');
   }
 
-  private async returnContext(context: BrowserContext): Promise<void> {
-    // Clear pages
-    for (const page of context.pages()) {
-      await page.close().catch(() => {});
-    }
-
-    // Reset cookies/state for clean reuse
-    await context.clearCookies().catch(() => {});
-
-    // Return to pool or waiters
-    if (this.contextQueue.length > 0) {
-      const waiter = this.contextQueue.shift()!;
-      waiter(context);
-    } else if (this.contextPool.length < this.maxContexts) {
-      this.contextPool.push(context);
-    } else {
-      await context.close().catch(() => {});
+  private loadMetadata(profileName: string): Record<string, unknown> | null {
+    const path = this.getMetadataPath(profileName);
+    if (!existsSync(path)) return null;
+    try {
+      return JSON.parse(readFileSync(path, 'utf-8'));
+    } catch {
+      return null;
     }
   }
 
-  // ==================== Public API ====================
+  private saveMetadata(profileName: string, data: Record<string, unknown>): void {
+    const dir = this.getProfileDir(profileName);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(this.getMetadataPath(profileName), JSON.stringify(data, null, 2));
+  }
+
+  // ==================== Session Management ====================
 
   async create(profileName: string): Promise<BrowserInfo> {
+    // Check if session already exists for this profile
+    const existing = this.sessions.get(profileName);
+    if (existing) {
+      existing.lastActivity = Date.now();
+      existing.info.lastActivity = new Date().toISOString();
+      return existing.info;
+    }
+
+    // Check session limit
+    if (this.sessions.size >= this.maxSessions) {
+      // Close oldest session
+      const oldest = Array.from(this.sessions.values())
+        .sort((a, b) => a.lastActivity - b.lastActivity)[0];
+      if (oldest) {
+        await this.closeSession(oldest.info.id);
+      }
+    }
+
+    // Create new persistent context
     const id = uuidv4();
-    const context = await this.getContext();
+    const chrome = this.chromePool[this.sessions.size % this.chromePool.length];
+    const context = await chrome.newContext();
     const page = await context.newPage();
     const pageId = uuidv4();
 
@@ -140,62 +132,93 @@ class BrowserManager {
       lastActivity: new Date().toISOString(),
     };
 
-    this.browsers.set(id, {
+    this.sessions.set(profileName, {
       info,
       context,
       pages: new Map([[pageId, { page, mutex: new Mutex() }]]),
+      profileName,
+      lastActivity: Date.now(),
     });
 
+    // Save metadata
+    this.saveMetadata(profileName, {
+      id,
+      createdAt: info.createdAt,
+    });
+
+    console.log(`Session created: ${profileName} (${this.sessions.size} active)`);
     return info;
   }
 
   async close(browserId: string): Promise<boolean> {
-    const managed = this.browsers.get(browserId);
-    if (!managed) return false;
+    return this.closeSession(browserId);
+  }
 
-    await this.returnContext(managed.context);
-    this.browsers.delete(browserId);
-    return true;
+  private async closeSession(browserId: string): Promise<boolean> {
+    let found = false;
+    for (const [profileName, managed] of this.sessions) {
+      if (managed.info.id === browserId) {
+        await managed.context.close().catch(() => {});
+        this.sessions.delete(profileName);
+        found = true;
+        console.log(`Session closed: ${profileName} (${this.sessions.size} active)`);
+        break;
+      }
+    }
+    return found;
   }
 
   get(browserId: string): BrowserInfo | null {
-    return this.browsers.get(browserId)?.info || null;
+    for (const managed of this.sessions.values()) {
+      if (managed.info.id === browserId) return managed.info;
+    }
+    return null;
+  }
+
+  getByProfile(profileName: string): BrowserInfo | null {
+    return this.sessions.get(profileName)?.info || null;
   }
 
   list(): BrowserInfo[] {
-    return Array.from(this.browsers.values()).map(m => m.info);
+    return Array.from(this.sessions.values()).map(m => m.info);
   }
 
   async createPage(browserId: string): Promise<PageInfo | null> {
-    const managed = this.browsers.get(browserId);
-    if (!managed) return null;
-    const page = await managed.context.newPage();
-    const pageId = uuidv4();
-    managed.pages.set(pageId, { page, mutex: new Mutex() });
-    return { id: pageId, url: page.url(), title: '' };
+    for (const managed of this.sessions.values()) {
+      if (managed.info.id === browserId) {
+        const page = await managed.context.newPage();
+        const pageId = uuidv4();
+        managed.pages.set(pageId, { page, mutex: new Mutex() });
+        managed.lastActivity = Date.now();
+        return { id: pageId, url: page.url(), title: '' };
+      }
+    }
+    return null;
   }
 
   async exec<T>(browserId: string, pageId: string, fn: (page: Page) => Promise<T>): Promise<T> {
-    const managed = this.browsers.get(browserId);
-    if (!managed) throw new Error(`Browser ${browserId} not found`);
-    const pageData = managed.pages.get(pageId);
-    if (!pageData) throw new Error(`Page ${pageId} not found`);
-    await pageData.mutex.acquire();
-    try {
-      return await fn(pageData.page);
-    } finally {
-      pageData.mutex.release();
+    for (const managed of this.sessions.values()) {
+      if (managed.info.id === browserId) {
+        const pageData = managed.pages.get(pageId);
+        if (!pageData) throw new Error(`Page ${pageId} not found`);
+        managed.lastActivity = Date.now();
+        await pageData.mutex.acquire();
+        try {
+          return await fn(pageData.page);
+        } finally {
+          pageData.mutex.release();
+        }
+      }
     }
+    throw new Error(`Browser ${browserId} not found`);
   }
 
   getStats() {
     return {
+      activeSessions: this.sessions.size,
+      maxSessions: this.maxSessions,
       chromeProcesses: this.chromePool.length,
-      cachedContexts: this.contextPool.length,
-      waitingRequests: this.contextQueue.length,
-      activeSessions: this.browsers.size,
-      maxChrome: this.maxChrome,
-      maxContexts: this.maxContexts,
+      profiles: Array.from(this.sessions.keys()),
     };
   }
 }
