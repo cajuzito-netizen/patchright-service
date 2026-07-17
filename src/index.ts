@@ -8,6 +8,7 @@
 import express from 'express';
 import cors from 'cors';
 import { execSync, spawn, ChildProcess } from 'child_process';
+import os from 'os';
 import config from './config.js';
 import routes from './routes.js';
 
@@ -16,6 +17,19 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(routes);
+
+// Resource logging
+function logResources() {
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = totalMem - freeMem;
+  const memPercent = ((usedMem / totalMem) * 100).toFixed(1);
+  const loadAvg = os.loadavg();
+  
+  console.log(`[Resources] CPU: ${loadAvg[0].toFixed(2)} | Memory: ${(usedMem/1024/1024/1024).toFixed(1)}GB/${(totalMem/1024/1024/1024).toFixed(1)}GB (${memPercent}%)`);
+}
+
+setInterval(logResources, 10000); // Log every 10s
 
 // Root endpoint with usage info
 app.get('/', (req, res) => {
