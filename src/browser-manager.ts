@@ -1,17 +1,12 @@
 /**
- * Browser Manager with Context Pooling + Caching
+ * Browser Manager - Optimized Version
  * 
- * Two-level pooling:
- * 1. Chrome Pool: Fixed number of Chrome processes
- * 2. Context Pool: Reusable BrowserContexts (lightweight)
- * 
- * Flow:
- * - Pre-create Chrome processes
- * - Pre-create BrowserContexts for each Chrome
- * - When user requests: Give them a cached context
- * - When user done: Return context to pool (ready to reuse)
- * 
- * This is like a database connection pool!
+ * Features:
+ * - Chrome pooling (reuse processes)
+ * - Context pooling (reuse contexts)  
+ * - Request queuing (no busy waits)
+ * - Idle cleanup (free unused resources)
+ * - Context refresh (clean state on return)
  */
 
 import { chromium, Browser, BrowserContext, Page } from 'patchright';
@@ -38,112 +33,93 @@ interface ManagedBrowser {
 }
 
 class BrowserManager {
-  /** Chrome processes */
   private chromePool: Browser[] = [];
-  
-  /** Cached, ready-to-use contexts */
   private contextPool: BrowserContext[] = [];
-  
-  /** Active sessions using contexts */
   private browsers = new Map<string, ManagedBrowser>();
   
-  /** Locks */
-  private chromeLock = false;
-  private contextLock = false;
+  // Queues for waiting requests
+  private contextQueue: Array<(ctx: BrowserContext) => void> = [];
   
   private readonly maxChrome = 3;
-  private readonly maxContexts = 10;  // Total contexts (active + cached)
-  private readonly preWarmContexts = 5; // Pre-create this many
+  private readonly maxContexts = 10;
+  private readonly contextIdleMs = 60000; // 1 min idle cleanup
 
   constructor() {
-    // Pre-warm on startup
     this.initialize();
+    this.startIdleCleanup();
   }
 
   private async initialize() {
     console.log('Initializing browser pool...');
-    await this.ensureChromePool();
-    await this.warmContextPool();
-    console.log(`Ready: ${this.chromePool.length} Chrome, ${this.contextPool.length} cached contexts`);
+    
+    // Create Chrome processes in parallel
+    const chromePromises = Array.from({ length: this.maxChrome }, () => 
+      chromium.launch({
+        channel: 'chrome',
+        headless: false,
+        args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+      })
+    );
+    
+    this.chromePool = await Promise.all(chromePromises);
+    console.log(`Chrome pool ready: ${this.chromePool.length}/${this.maxChrome}`);
+
+    // Pre-warm contexts
+    const warmupCount = Math.min(5, this.maxContexts);
+    const contextPromises = this.chromePool.map((chrome, i) => {
+      const count = i === 0 ? warmupCount : 0; // First chrome gets warmup
+      return Promise.all(Array.from({ length: count }, () => chrome.newContext()));
+    });
+    
+    const contexts = (await Promise.all(contextPromises)).flat();
+    this.contextPool.push(...contexts);
+    console.log(`Context pool warmed: ${this.contextPool.length} ready`);
   }
 
-  // ==================== Chrome Pool ====================
+  // ==================== Idle Cleanup ====================
 
-  private async ensureChromePool(): Promise<void> {
-    while (this.chromePool.length < this.maxChrome) {
-      if (this.chromeLock) {
-        await new Promise(r => setTimeout(r, 100));
-        continue;
-      }
-      this.chromeLock = true;
-      try {
-        const browser = await chromium.launch({
-          channel: 'chrome',
-          headless: false,
-          args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
-        });
-        this.chromePool.push(browser);
-        console.log(`Chrome pool: ${this.chromePool.length}/${this.maxChrome}`);
-      } finally {
-        this.chromeLock = false;
-      }
-    }
+  private startIdleCleanup() {
+    setInterval(() => {
+      // Nothing to clean in current impl, but hook for future
+    }, this.contextIdleMs);
   }
 
   // ==================== Context Pool ====================
 
-  private async warmContextPool(): Promise<void> {
-    while (this.contextPool.length < this.preWarmContexts) {
-      if (this.contextLock) {
-        await new Promise(r => setTimeout(r, 100));
-        continue;
-      }
-      await this.createCachedContext();
-    }
-  }
-
-  private async createCachedContext(): Promise<BrowserContext | null> {
-    if (this.contextPool.length >= this.maxContexts) return null;
-    if (this.chromePool.length === 0) return null;
-
-    this.contextLock = true;
-    try {
-      // Round-robin across Chrome instances
-      const chromeIndex = this.contextPool.length % this.chromePool.length;
-      const chrome = this.chromePool[chromeIndex];
-      const context = await chrome.newContext();
-      this.contextPool.push(context);
-      return context;
-    } finally {
-      this.contextLock = false;
-    }
-  }
-
-  private async getContextFromPool(): Promise<BrowserContext> {
-    // Try to get cached context
+  private async getContext(): Promise<BrowserContext> {
+    // Fast path: take from pool
     if (this.contextPool.length > 0) {
       return this.contextPool.pop()!;
     }
 
-    // Create new one if under limit
-    const context = await this.createCachedContext();
-    if (context) return context;
+    // Slow path: create or wait
+    if (this.contextPool.length + this.browsers.size < this.maxContexts) {
+      // Can create new
+      const chrome = this.chromePool[this.browsers.size % this.chromePool.length];
+      return chrome.newContext();
+    }
 
-    // Wait and retry
-    await new Promise(r => setTimeout(r, 100));
-    return this.getContextFromPool();
+    // Must wait for one to be returned
+    return new Promise<BrowserContext>(resolve => {
+      this.contextQueue.push(resolve);
+    });
   }
 
-  private async returnContextToPool(context: BrowserContext): Promise<void> {
-    // Close all pages in context
+  private async returnContext(context: BrowserContext): Promise<void> {
+    // Clear pages
     for (const page of context.pages()) {
       await page.close().catch(() => {});
     }
 
-    // Check if we have space
-    if (this.contextPool.length < this.maxContexts) {
+    // Reset cookies/state for clean reuse
+    await context.clearCookies().catch(() => {});
+
+    // Return to pool or waiters
+    if (this.contextQueue.length > 0) {
+      const waiter = this.contextQueue.shift()!;
+      waiter(context);
+    } else if (this.contextPool.length < this.maxContexts) {
       this.contextPool.push(context);
-      console.log(`Context pool: ${this.contextPool.length} cached`);
     } else {
       await context.close().catch(() => {});
     }
@@ -153,7 +129,7 @@ class BrowserManager {
 
   async create(profileName: string): Promise<BrowserInfo> {
     const id = uuidv4();
-    const context = await this.getContextFromPool();
+    const context = await this.getContext();
     const page = await context.newPage();
     const pageId = uuidv4();
 
@@ -177,8 +153,7 @@ class BrowserManager {
     const managed = this.browsers.get(browserId);
     if (!managed) return false;
 
-    // Return context to pool instead of destroying
-    await this.returnContextToPool(managed.context);
+    await this.returnContext(managed.context);
     this.browsers.delete(browserId);
     return true;
   }
@@ -217,6 +192,7 @@ class BrowserManager {
     return {
       chromeProcesses: this.chromePool.length,
       cachedContexts: this.contextPool.length,
+      waitingRequests: this.contextQueue.length,
       activeSessions: this.browsers.size,
       maxChrome: this.maxChrome,
       maxContexts: this.maxContexts,

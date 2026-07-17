@@ -19,6 +19,20 @@ import {
 
 const router: ReturnType<typeof Router> = Router();
 
+// Request timeout middleware
+const TIMEOUT_MS = 60000; // 60s
+router.use((req, res, next) => {
+  const timer = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(408).json({ success: false, message: 'Request timeout' });
+    }
+  }, TIMEOUT_MS);
+  
+  res.on('finish', () => clearTimeout(timer));
+  res.on('close', () => clearTimeout(timer));
+  next();
+});
+
 // ==================== Stats ====================
 
 router.get('/stats', (_req: Request, res: Response<ApiResponse>) => {
